@@ -11,6 +11,7 @@ extern "C" {
 bool MFVideo_Play(const wchar_t* pwszFilePath, HWND hwndParent);
 void MFVideo_Stop(void);
 bool MFVideo_IsPlaying(void);
+void MFVideo_Repaint(void);
 
 #ifdef __cplusplus
 }

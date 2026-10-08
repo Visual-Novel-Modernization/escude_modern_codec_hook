@@ -146,9 +146,17 @@ static LRESULT CALLBACK SubclassWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
             break;
         }
 
-        case 1209: // media_isplay
+        case 1209: // media_isplay! (Polled by while(media_isplay()))
         {
             if (g_bCustomVideoActive) {
+                // Pump messages for popup video window and repaint
+                MSG msg;
+                while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
+                    TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+                MFVideo_Repaint();
+
                 bool playing = MFVideo_IsPlaying();
                 if (!playing) {
                     MFVideo_Stop();

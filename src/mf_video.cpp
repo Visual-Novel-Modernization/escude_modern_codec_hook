@@ -19,11 +19,22 @@ static HWND g_hwndParent = NULL;
 static HWND g_hwndPopup = NULL;
 
 static IMFMediaSession* g_pSession = NULL;
+static IMFVideoDisplayControl* g_pDisplay = NULL;
 
 static LRESULT CALLBACK VideoPopupWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     switch (uMsg) {
         case WM_ERASEBKGND:
             return 1;
+        case WM_PAINT:
+        {
+            PAINTSTRUCT ps;
+            BeginPaint(hWnd, &ps);
+            if (g_pDisplay) {
+                g_pDisplay->RepaintVideo();
+            }
+            EndPaint(hWnd, &ps);
+            return 0;
+        }
         case WM_LBUTTONDOWN:
         case WM_RBUTTONDOWN:
         case WM_KEYDOWN:
@@ -31,7 +42,7 @@ static LRESULT CALLBACK VideoPopupWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
             MFVideo_Stop();
             return 0;
         case WM_SETCURSOR:
-            SetCursor(NULL); // Hide cursor during movie
+            SetCursor(NULL);
             return TRUE;
     }
     return DefWindowProcW(hWnd, uMsg, wParam, lParam);
@@ -224,10 +235,24 @@ static DWORD WINAPI VideoThreadProc(LPVOID lpParam) {
     }
 
     if (SUCCEEDED(hr)) {
+        // Query Video Display Control to set destination rectangle and aspect ratio
+        IMFVideoDisplayControl* pDisplay = NULL;
+        if (SUCCEEDED(MFGetService(pSession, MR_VIDEO_RENDER_SERVICE, IID_PPV_ARGS(&pDisplay)))) {
+            RECT rc;
+            GetClientRect(g_hwndPopup, &rc);
+            pDisplay->SetVideoPosition(NULL, &rc);
+            pDisplay->SetAspectRatioMode(MFVideoARMode_PreservePicture);
+            g_pDisplay = pDisplay;
+        }
+
         HANDLE waitHandles[2] = { g_hStopEvent, g_hEndedEvent };
         WaitForMultipleObjects(2, waitHandles, FALSE, INFINITE);
     }
 
+    if (g_pDisplay) {
+        g_pDisplay->Release();
+        g_pDisplay = NULL;
+    }
     if (pSession) {
         pSession->Stop();
         pSession->Close();
@@ -250,6 +275,12 @@ static DWORD WINAPI VideoThreadProc(LPVOID lpParam) {
 
     g_bIsPlaying = false;
     return 0;
+}
+
+void MFVideo_Repaint(void) {
+    if (g_pDisplay) {
+        g_pDisplay->RepaintVideo();
+    }
 }
 
 bool MFVideo_Play(const wchar_t* pwszFilePath, HWND hwndParent) {
