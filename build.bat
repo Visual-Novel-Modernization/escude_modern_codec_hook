@@ -10,13 +10,13 @@ if not exist bin mkdir bin
 g++ -O2 -shared -o bin\d3d9.dll ^
     src\main.cpp ^
     src\jxl_loader.c ^
-    src\mf_video.cpp ^
+    src\av1_player.cpp ^
     -Isrc ^
     -DJXL_STATIC_DEFINE ^
     -static-libgcc -static-libstdc++ ^
     -Wl,--kill-at ^
-    -Wl,-Bstatic -ljxl -ljxl_cms -lhwy -lbrotlidec -lbrotlienc -lbrotlicommon -Wl,-Bdynamic ^
-    -lmfplat -lmf -lmfuuid -lstrmiids -lole32 -loleaut32 -lshlwapi
+    -Wl,-Bstatic -ljxl -ljxl_cms -lhwy -lbrotlidec -lbrotlienc -lbrotlicommon -ldav1d -Wl,-Bdynamic ^
+    -lmfplat -lmfreadwrite -lmfuuid -lole32 -loleaut32 -lshlwapi -lgdi32 -lwinmm
 
 if %ERRORLEVEL% EQU 0 (
     echo [+] Build successful: bin\d3d9.dll

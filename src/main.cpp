@@ -9,7 +9,7 @@
 
 #include "hook_defs.h"
 #include "jxl_loader.h"
-#include "mf_video.h"
+#include "av1_player.h"
 
 static void LogInfo(const char* fmt, ...) {
     FILE* f = fopen("d3d9_hook.log", "a");
@@ -103,16 +103,14 @@ static LRESULT CALLBACK SubclassWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
                     wchar_t wSelectedFile[MAX_PATH];
                     MultiByteToWideChar(CP_ACP, 0, selectedFile, -1, wSelectedFile, MAX_PATH);
 
-                    LogInfo("[Video] Playing modern AV1 video via Media Foundation on popup: %s (Parent: %p)",
-                            selectedFile, hWnd);
-
-                    if (MFVideo_Play(wSelectedFile, hWnd)) {
-                        LogInfo("[Video] MFVideo_Play started successfully!");
+                    LogInfo("[Video] Playing AV1 video via dav1d: %s", selectedFile);
+                    if (AV1Player_Play(wSelectedFile, hWnd)) {
+                        LogInfo("[Video] AV1Player_Play started successfully!");
                         g_bCustomVideoActive = true;
                         if (g_pIsPlaying) *g_pIsPlaying = 1;
                         return 1;
                     } else {
-                        LogInfo("[Video] MFVideo_Play failed!");
+                        LogInfo("[Video] AV1Player_Play failed!");
                     }
                 }
             }
@@ -125,7 +123,7 @@ static LRESULT CALLBACK SubclassWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
         {
             if (g_bCustomVideoActive) {
                 LogInfo("[Video] Media close requested");
-                MFVideo_Stop();
+                AV1Player_Stop();
                 if (g_pIsPlaying) *g_pIsPlaying = 0;
                 g_bCustomVideoActive = false;
                 return 1;
@@ -149,17 +147,9 @@ static LRESULT CALLBACK SubclassWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
         case 1209: // media_isplay! (Polled by while(media_isplay()))
         {
             if (g_bCustomVideoActive) {
-                // Pump messages for popup video window and repaint
-                MSG msg;
-                while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
-                    TranslateMessage(&msg);
-                    DispatchMessageW(&msg);
-                }
-                MFVideo_Repaint();
-
-                bool playing = MFVideo_IsPlaying();
+                bool playing = AV1Player_IsPlaying();
                 if (!playing) {
-                    MFVideo_Stop();
+                    AV1Player_Stop();
                     if (g_pIsPlaying) *g_pIsPlaying = 0;
                     g_bCustomVideoActive = false;
                 }
@@ -347,7 +337,7 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
         DisableThreadLibraryCalls(hinstDLL);
         InitHooks();
     } else if (fdwReason == DLL_PROCESS_DETACH) {
-        MFVideo_Stop();
+        AV1Player_Stop();
     }
     return TRUE;
 }
