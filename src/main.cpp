@@ -58,26 +58,14 @@ static volatile DWORD* g_pIsPlaying = NULL;
 static bool g_bCustomVideoActive = false;
 static WNDPROC g_pOrigWndProc = NULL;
 
-static BOOL __cdecl Hook_VideoPlay(const char* filename);
-
 // Subclass window proc for intercepting game engine media messages
 static LRESULT CALLBACK SubclassWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     switch (uMsg) {
-        case WM_KEYDOWN:
-        {
-            if (wParam == VK_F11) {
-                LogInfo("[Test] F11 pressed! Triggering Hook_VideoPlay('opening.wmv')");
-                Hook_VideoPlay("opening.wmv");
-                return 0;
-            }
-            break;
-        }
-
         case 1204: // media_open (wParam = const char* filename)
         {
             const char* filename = (const char*)wParam;
+            LogInfo("[Video] Message 1204 (media_open): %s", filename ? filename : "(null)");
             if (filename) {
-                // Check if modern video exists
                 char testPath[MAX_PATH];
                 const char* ext = strrchr(filename, '.');
                 size_t baseLen = ext ? (size_t)(ext - filename) : strlen(filename);
@@ -91,7 +79,6 @@ static LRESULT CALLBACK SubclassWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
                     strcpy(testPath + baseLen, modernExts[i]);
                     DWORD attr = GetFileAttributesA(testPath);
                     if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
-                        // For .wmv, check if it is really MP4/Matroska container with AV1
                         if (i == 3) {
                             FILE* f = fopen(testPath, "rb");
                             if (f) {
@@ -116,9 +103,9 @@ static LRESULT CALLBACK SubclassWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
                     wchar_t wSelectedFile[MAX_PATH];
                     MultiByteToWideChar(CP_ACP, 0, selectedFile, -1, wSelectedFile, MAX_PATH);
 
-                    LogInfo("[Video] Opening modern video via Media Foundation: %s", selectedFile);
+                    LogInfo("[Video] Playing modern AV1 video via Media Foundation: %s (HWND: %p)", selectedFile, hWnd);
                     if (MFVideo_Play(wSelectedFile, hWnd)) {
-                        LogInfo("[Video] MFVideo_Play succeeded!");
+                        LogInfo("[Video] MFVideo_Play started successfully!");
                         g_bCustomVideoActive = true;
                         if (g_pIsPlaying) *g_pIsPlaying = 1;
                         return 1;
@@ -133,6 +120,7 @@ static LRESULT CALLBACK SubclassWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
 
         case 1205: // media_close
         {
+            LogInfo("[Video] Message 1205 (media_close)");
             if (g_bCustomVideoActive) {
                 MFVideo_Stop();
                 if (g_pIsPlaying) *g_pIsPlaying = 0;
@@ -142,7 +130,7 @@ static LRESULT CALLBACK SubclassWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
             break;
         }
 
-        case 1207: // media_play
+        case 1206: // media_pause
         {
             if (g_bCustomVideoActive) {
                 return 1;
@@ -150,15 +138,43 @@ static LRESULT CALLBACK SubclassWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
             break;
         }
 
-        case 1210: // media_isplay
+        case 1207: // media_stop
+        {
+            LogInfo("[Video] Message 1207 (media_stop)");
+            if (g_bCustomVideoActive) {
+                MFVideo_Stop();
+                if (g_pIsPlaying) *g_pIsPlaying = 0;
+                g_bCustomVideoActive = false;
+                return 1;
+            }
+            break;
+        }
+
+        case 1208: // media_repeat
+        {
+            if (g_bCustomVideoActive) {
+                return 1;
+            }
+            break;
+        }
+
+        case 1209: // media_isplay! (Checked by while(media_isplay()))
         {
             if (g_bCustomVideoActive) {
                 bool playing = MFVideo_IsPlaying();
-                if (!playing && g_pIsPlaying) {
-                    *g_pIsPlaying = 0;
+                if (!playing) {
+                    if (g_pIsPlaying) *g_pIsPlaying = 0;
                     g_bCustomVideoActive = false;
                 }
                 return playing ? 1 : 0;
+            }
+            break;
+        }
+
+        case 1210: // media_play
+        {
+            if (g_bCustomVideoActive) {
+                return 1;
             }
             break;
         }
@@ -172,13 +188,10 @@ static LRESULT CALLBACK SubclassWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
             break;
         }
 
-        case 1074: // EC_COMPLETE notification
+        case 1212: // media_size
         {
             if (g_bCustomVideoActive) {
-                MFVideo_Stop();
-                if (g_pIsPlaying) *g_pIsPlaying = 0;
-                g_bCustomVideoActive = false;
-                return 0;
+                return 1;
             }
             break;
         }
@@ -190,70 +203,9 @@ static LRESULT CALLBACK SubclassWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
     return DefWindowProcA(hWnd, uMsg, wParam, lParam);
 }
 
-static fn_VideoPlay g_pOrig_VideoPlay = NULL;
-
-static BOOL __cdecl Hook_VideoPlay(const char* filename) {
-    LogInfo("[Video] VideoPlay requested: %s", filename ? filename : "(null)");
-    if (!filename) return FALSE;
-
-    // Check if modern video exists
-    char testPath[MAX_PATH];
-    const char* ext = strrchr(filename, '.');
-    size_t baseLen = ext ? (size_t)(ext - filename) : strlen(filename);
-
-    const char* modernExts[] = { ".mp4", ".webm", ".mkv", ".wmv" };
-    bool foundModern = false;
-    char selectedFile[MAX_PATH];
-
-    for (int i = 0; i < 4; i++) {
-        memcpy(testPath, filename, baseLen);
-        strcpy(testPath + baseLen, modernExts[i]);
-        DWORD attr = GetFileAttributesA(testPath);
-        if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
-            if (i == 3) {
-                FILE* f = fopen(testPath, "rb");
-                if (f) {
-                    uint8_t hdr[12] = {0};
-                    fread(hdr, 1, 12, f);
-                    fclose(f);
-                    if (memcmp(hdr + 4, "ftyp", 4) == 0 || (hdr[0] == 0x1A && hdr[1] == 0x45 && hdr[2] == 0xDF && hdr[3] == 0xA3)) {
-                        strcpy(selectedFile, testPath);
-                        foundModern = true;
-                        break;
-                    }
-                }
-            } else {
-                strcpy(selectedFile, testPath);
-                foundModern = true;
-                break;
-            }
-        }
-    }
-
-    if (foundModern) {
-        HWND targetHwnd = (g_ppGameHWnd && *g_ppGameHWnd) ? *g_ppGameHWnd : NULL;
-        wchar_t wSelectedFile[MAX_PATH];
-        MultiByteToWideChar(CP_ACP, 0, selectedFile, -1, wSelectedFile, MAX_PATH);
-
-        LogInfo("[Video] Playing modern AV1 video via Media Foundation: %s (HWND: %p)", selectedFile, targetHwnd);
-        if (MFVideo_Play(wSelectedFile, targetHwnd)) {
-            LogInfo("[Video] MFVideo_Play started successfully!");
-            g_bCustomVideoActive = true;
-            if (g_pIsPlaying) *g_pIsPlaying = 1;
-            return TRUE;
-        } else {
-            LogInfo("[Video] MFVideo_Play failed!");
-        }
-    }
-
-    g_bCustomVideoActive = false;
-    return g_pOrig_VideoPlay(filename);
-}
-
 // Inline hook trampoline for LoadPNG
 static void* Hook_LoadPNG(const char* lpFileName) {
     if (!lpFileName) return NULL;
-    LogInfo("[Image] Request: %s", lpFileName);
 
     // Check if game window needs subclassing
     if (g_ppGameHWnd && *g_ppGameHWnd && !g_pOrigWndProc) {
@@ -288,7 +240,6 @@ static void* Hook_LoadPNG(const char* lpFileName) {
                             void* surface = DecodeJxlToGameSurface(buf, fsize, g_pCreateImageBuffer);
                             free(buf);
                             if (surface) {
-                                LogInfo("[Image] Loaded loose JXL: %s (surface: %p)", jxlPath, surface);
                                 return surface;
                             }
                         } else {
@@ -323,14 +274,12 @@ static void* Hook_LoadPNG(const char* lpFileName) {
                             void* surface = DecodeJxlToGameSurface(fileBuf, totalSize, g_pCreateImageBuffer);
                             free(fileBuf);
                             if (surface) {
-                                LogInfo("[Image] Loaded archive JXL: %s (surface: %p)", lpFileName, surface);
                                 return surface;
                             }
                         }
                     }
                 }
             }
-            // Rewind and close before letting original LoadPNG open it cleanly
             g_pSeekExpFile(stream, 0, FILE_BEGIN);
             g_pCloseExpFile(stream);
         }
@@ -347,28 +296,25 @@ static bool InstallInlineHook(void* targetFunc, void* detourFunc, void** ppTramp
     void* trampoline = VirtualAlloc(NULL, patchLen + 5, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
     if (!trampoline) return false;
 
-    // Copy original instructions to trampoline
     memcpy(trampoline, targetFunc, patchLen);
 
-    // JMP from trampoline back to (targetFunc + patchLen)
     uint8_t* pTrampJump = (uint8_t*)trampoline + patchLen;
-    pTrampJump[0] = 0xE9; // JMP rel32
+    pTrampJump[0] = 0xE9;
     int32_t relToTarget = (int32_t)((uint8_t*)targetFunc + patchLen - (pTrampJump + 5));
     memcpy(pTrampJump + 1, &relToTarget, 4);
 
     *ppTrampoline = trampoline;
 
-    // Write JMP to detourFunc at targetFunc
     DWORD oldProtect;
     VirtualProtect(targetFunc, patchLen, PAGE_EXECUTE_READWRITE, &oldProtect);
 
     uint8_t* pTarget = (uint8_t*)targetFunc;
-    pTarget[0] = 0xE9; // JMP rel32
+    pTarget[0] = 0xE9;
     int32_t relToDetour = (int32_t)((uint8_t*)detourFunc - (pTarget + 5));
     memcpy(pTarget + 1, &relToDetour, 4);
 
     for (size_t i = 5; i < patchLen; i++) {
-        pTarget[i] = 0x90; // NOP
+        pTarget[i] = 0x90;
     }
 
     VirtualProtect(targetFunc, patchLen, oldProtect, &oldProtect);
@@ -398,7 +344,6 @@ static void InitHooks(void) {
     }
 
     if (!g_pCurrentGame) {
-        // Fallback: match by size or default to Haison 1
         g_pCurrentGame = &g_SupportedGames[0];
     }
 
@@ -412,7 +357,7 @@ static void InitHooks(void) {
     g_pIsPlaying         = (volatile DWORD*)g_pCurrentGame->is_playing_ptr;
 
     LogInfo("=== d3d9_hook initialized ===");
-    LogInfo("Base: %p, EntryPoint RVA: 0x%08X", (void*)hMain, entryRVA);
+    LogInfo("Base: %p, EntryPoint RVA: 0x000F9429", (void*)hMain, entryRVA);
     LogInfo("Target Game: %s", g_pCurrentGame->game_name);
 
     // Install inline hook on LoadPNG (6 bytes: 55 8b ec 83 ec 48)
@@ -423,17 +368,6 @@ static void InitHooks(void) {
         6
     );
     LogInfo("LoadPNG hook installed: %s", bHooked ? "SUCCESS" : "FAILED");
-
-    // Install inline hook on VideoPlay (12 bytes: 33 c0 a3 ... a3 ...)
-    bool bHookVideo = InstallInlineHook(
-        (void*)g_pCurrentGame->video_play,
-        (void*)Hook_VideoPlay,
-        (void**)&g_pOrig_VideoPlay,
-        12
-    );
-    LogInfo("VideoPlay hook installed: %s", bHookVideo ? "SUCCESS" : "FAILED");
-
-    MFVideo_Init();
 }
 
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
@@ -441,7 +375,7 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
         DisableThreadLibraryCalls(hinstDLL);
         InitHooks();
     } else if (fdwReason == DLL_PROCESS_DETACH) {
-        MFVideo_Shutdown();
+        MFVideo_Stop();
     }
     return TRUE;
 }
