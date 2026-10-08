@@ -9,7 +9,7 @@
 
 #include "hook_defs.h"
 #include "jxl_loader.h"
-#include "av1_player.h"
+#include "lav_hook.h"
 
 static void LogInfo(const char* fmt, ...) {
     FILE* f = fopen("d3d9_hook.log", "a");
@@ -52,131 +52,9 @@ static fn_ReadExpFile g_pReadExpFile = NULL;
 static fn_SeekExpFile g_pSeekExpFile = NULL;
 static fn_LoadPNG g_pOrig_LoadPNG = NULL;
 
-static HWND* g_ppGameHWnd = NULL;
-static volatile DWORD* g_pIsPlaying = NULL;
-
-static bool g_bCustomVideoActive = false;
-static WNDPROC g_pOrigWndProc = NULL;
-
-// Subclass window proc for intercepting game engine media messages
-static LRESULT CALLBACK SubclassWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
-    switch (uMsg) {
-        case 1204: // media_open (wParam = const char* filename)
-        {
-            const char* filename = (const char*)wParam;
-            LogInfo("[Video] Message 1204 (media_open): %s", filename ? filename : "(null)");
-            if (filename) {
-                char testPath[MAX_PATH];
-                const char* ext = strrchr(filename, '.');
-                size_t baseLen = ext ? (size_t)(ext - filename) : strlen(filename);
-
-                const char* modernExts[] = { ".mp4", ".webm", ".mkv", ".wmv" };
-                bool foundModern = false;
-                char selectedFile[MAX_PATH];
-
-                for (int i = 0; i < 4; i++) {
-                    memcpy(testPath, filename, baseLen);
-                    strcpy(testPath + baseLen, modernExts[i]);
-                    DWORD attr = GetFileAttributesA(testPath);
-                    if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
-                        if (i == 3) {
-                            FILE* f = fopen(testPath, "rb");
-                            if (f) {
-                                uint8_t hdr[12] = {0};
-                                fread(hdr, 1, 12, f);
-                                fclose(f);
-                                if (memcmp(hdr + 4, "ftyp", 4) == 0 || (hdr[0] == 0x1A && hdr[1] == 0x45 && hdr[2] == 0xDF && hdr[3] == 0xA3)) {
-                                    strcpy(selectedFile, testPath);
-                                    foundModern = true;
-                                    break;
-                                }
-                            }
-                        } else {
-                            strcpy(selectedFile, testPath);
-                            foundModern = true;
-                            break;
-                        }
-                    }
-                }
-
-                if (foundModern) {
-                    wchar_t wSelectedFile[MAX_PATH];
-                    MultiByteToWideChar(CP_ACP, 0, selectedFile, -1, wSelectedFile, MAX_PATH);
-
-                    LogInfo("[Video] Playing AV1 video via dav1d: %s", selectedFile);
-                    if (AV1Player_Play(wSelectedFile, hWnd)) {
-                        LogInfo("[Video] AV1Player_Play started successfully!");
-                        g_bCustomVideoActive = true;
-                        if (g_pIsPlaying) *g_pIsPlaying = 1;
-                        return 1;
-                    } else {
-                        LogInfo("[Video] AV1Player_Play failed!");
-                    }
-                }
-            }
-            g_bCustomVideoActive = false;
-            break;
-        }
-
-        case 1205: // media_close
-        case 1207: // media_stop
-        {
-            if (g_bCustomVideoActive) {
-                LogInfo("[Video] Media close requested");
-                AV1Player_Stop();
-                if (g_pIsPlaying) *g_pIsPlaying = 0;
-                g_bCustomVideoActive = false;
-                return 1;
-            }
-            break;
-        }
-
-        case 1206: // media_pause
-        case 1208: // media_repeat
-        case 1210: // media_play
-        case 1211: // media_setvol
-        case 1212: // media_size
-        case 1213: // media_setvol alt
-        {
-            if (g_bCustomVideoActive) {
-                return 1;
-            }
-            break;
-        }
-
-        case 1209: // media_isplay! (Polled by while(media_isplay()))
-        {
-            if (g_bCustomVideoActive) {
-                bool playing = AV1Player_IsPlaying();
-                if (!playing) {
-                    AV1Player_Stop();
-                    if (g_pIsPlaying) *g_pIsPlaying = 0;
-                    g_bCustomVideoActive = false;
-                }
-                return playing ? 1 : 0;
-            }
-            break;
-        }
-    }
-
-    if (g_pOrigWndProc) {
-        return CallWindowProcA(g_pOrigWndProc, hWnd, uMsg, wParam, lParam);
-    }
-    return DefWindowProcA(hWnd, uMsg, wParam, lParam);
-}
-
 // Inline hook trampoline for LoadPNG
 static void* Hook_LoadPNG(const char* lpFileName) {
     if (!lpFileName) return NULL;
-
-    // Check if game window needs subclassing
-    if (g_ppGameHWnd && *g_ppGameHWnd && !g_pOrigWndProc) {
-        g_pOrigWndProc = (WNDPROC)GetWindowLongPtrA(*g_ppGameHWnd, GWLP_WNDPROC);
-        if (g_pOrigWndProc && g_pOrigWndProc != SubclassWndProc) {
-            SetWindowLongPtrA(*g_ppGameHWnd, GWLP_WNDPROC, (LONG_PTR)SubclassWndProc);
-            LogInfo("[Window] Subclassed game window %p (orig WndProc: %p)", *g_ppGameHWnd, g_pOrigWndProc);
-        }
-    }
 
     // Step 1: Check loose JXL file
     char jxlPath[MAX_PATH];
@@ -315,10 +193,7 @@ static void InitHooks(void) {
     g_pReadExpFile       = (fn_ReadExpFile)g_pCurrentGame->read_exp_file;
     g_pSeekExpFile       = (fn_SeekExpFile)g_pCurrentGame->seek_exp_file;
 
-    g_ppGameHWnd         = (HWND*)g_pCurrentGame->hwnd_ptr;
-    g_pIsPlaying         = (volatile DWORD*)g_pCurrentGame->is_playing_ptr;
-
-    LogInfo("=== d3d9_hook initialized ===");
+    LogInfo("=== d3d9_hook (LAV Filters Hardware Accelerated Edition) initialized ===");
     LogInfo("Base: %p, EntryPoint RVA: 0x%08X", (void*)hMain, entryRVA);
     LogInfo("Target Game: %s", g_pCurrentGame->game_name);
 
@@ -330,14 +205,16 @@ static void InitHooks(void) {
         6
     );
     LogInfo("LoadPNG hook installed: %s", bHooked ? "SUCCESS" : "FAILED");
+
+    // Install LAV Filters DirectShow hook
+    bool bLav = InstallLAVFiltersHook();
+    LogInfo("LAV Filters DirectShow hook installed: %s", bLav ? "SUCCESS" : "FAILED");
 }
 
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
     if (fdwReason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hinstDLL);
         InitHooks();
-    } else if (fdwReason == DLL_PROCESS_DETACH) {
-        AV1Player_Stop();
     }
     return TRUE;
 }
