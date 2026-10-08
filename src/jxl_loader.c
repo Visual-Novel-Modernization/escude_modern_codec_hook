@@ -34,9 +34,12 @@ void* DecodeJxlToGameSurface(const uint8_t* data, size_t size, fn_CreateImageBuf
     JxlDecoderCloseInput(dec);
 
     JxlBasicInfo info;
+    bool has_alpha = false;
+    int target_bpp = 32;
     JxlPixelFormat format = { 4, JXL_TYPE_UINT8, JXL_LITTLE_ENDIAN, 0 };
+
     void** surface = NULL;
-    uint8_t* temp_rgba = NULL;
+    uint8_t* temp_buffer = NULL;
     size_t temp_size = 0;
 
     for (;;) {
@@ -47,8 +50,18 @@ void* DecodeJxlToGameSurface(const uint8_t* data, size_t size, fn_CreateImageBuf
             if (JXL_DEC_SUCCESS != JxlDecoderGetBasicInfo(dec, &info)) {
                 break;
             }
-            // Allocate game surface: width, height, 32bpp
-            surface = pCreateBuffer(info.xsize, info.ysize, 32);
+
+            has_alpha = (info.alpha_bits > 0 && info.num_extra_channels > 0);
+            if (has_alpha) {
+                target_bpp = 32;
+                format.num_channels = 4; // RGBA
+            } else {
+                target_bpp = 24;
+                format.num_channels = 3; // RGB
+            }
+
+            // Allocate game surface with EXACT expected BPP (24 or 32)
+            surface = pCreateBuffer(info.xsize, info.ysize, target_bpp);
             if (!surface) {
                 break;
             }
@@ -56,27 +69,41 @@ void* DecodeJxlToGameSurface(const uint8_t* data, size_t size, fn_CreateImageBuf
             if (JXL_DEC_SUCCESS != JxlDecoderImageOutBufferSize(dec, &format, &temp_size)) {
                 break;
             }
-            temp_rgba = (uint8_t*)malloc(temp_size);
-            if (!temp_rgba) break;
+            temp_buffer = (uint8_t*)malloc(temp_size);
+            if (!temp_buffer) break;
 
-            if (JXL_DEC_SUCCESS != JxlDecoderSetImageOutBuffer(dec, &format, temp_rgba, temp_size)) {
+            if (JXL_DEC_SUCCESS != JxlDecoderSetImageOutBuffer(dec, &format, temp_buffer, temp_size)) {
                 break;
             }
         } else if (status == JXL_DEC_FULL_IMAGE) {
-            if (surface && surface[1] && temp_rgba) {
+            if (surface && surface[1] && temp_buffer) {
                 uint8_t* pBits = (uint8_t*)surface[1];
                 int stride = (int)(intptr_t)surface[3];
 
-                // Convert RGBA to Windows DIB BGRA (bottom-up scanlines)
-                for (uint32_t y = 0; y < info.ysize; y++) {
-                    uint8_t* dst_row = pBits + (info.ysize - 1 - y) * stride;
-                    const uint8_t* src_row = temp_rgba + y * (info.xsize * 4);
+                if (target_bpp == 32) {
+                    // Convert RGBA to Windows DIB BGRA (bottom-up scanlines)
+                    for (uint32_t y = 0; y < info.ysize; y++) {
+                        uint8_t* dst_row = pBits + (info.ysize - 1 - y) * stride;
+                        const uint8_t* src_row = temp_buffer + y * (info.xsize * 4);
 
-                    for (uint32_t x = 0; x < info.xsize; x++) {
-                        dst_row[x * 4 + 0] = src_row[x * 4 + 2]; // B
-                        dst_row[x * 4 + 1] = src_row[x * 4 + 1]; // G
-                        dst_row[x * 4 + 2] = src_row[x * 4 + 0]; // R
-                        dst_row[x * 4 + 3] = src_row[x * 4 + 3]; // A
+                        for (uint32_t x = 0; x < info.xsize; x++) {
+                            dst_row[x * 4 + 0] = src_row[x * 4 + 2]; // B
+                            dst_row[x * 4 + 1] = src_row[x * 4 + 1]; // G
+                            dst_row[x * 4 + 2] = src_row[x * 4 + 0]; // R
+                            dst_row[x * 4 + 3] = src_row[x * 4 + 3]; // A
+                        }
+                    }
+                } else if (target_bpp == 24) {
+                    // Convert RGB to Windows DIB BGR (bottom-up scanlines)
+                    for (uint32_t y = 0; y < info.ysize; y++) {
+                        uint8_t* dst_row = pBits + (info.ysize - 1 - y) * stride;
+                        const uint8_t* src_row = temp_buffer + y * (info.xsize * 3);
+
+                        for (uint32_t x = 0; x < info.xsize; x++) {
+                            dst_row[x * 3 + 0] = src_row[x * 3 + 2]; // B
+                            dst_row[x * 3 + 1] = src_row[x * 3 + 1]; // G
+                            dst_row[x * 3 + 2] = src_row[x * 3 + 0]; // R
+                        }
                     }
                 }
             }
@@ -85,7 +112,7 @@ void* DecodeJxlToGameSurface(const uint8_t* data, size_t size, fn_CreateImageBuf
         }
     }
 
-    if (temp_rgba) free(temp_rgba);
+    if (temp_buffer) free(temp_buffer);
     JxlDecoderDestroy(dec);
 
     return surface;
