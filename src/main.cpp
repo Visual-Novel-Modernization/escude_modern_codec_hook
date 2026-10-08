@@ -56,23 +56,7 @@ static HWND* g_ppGameHWnd = NULL;
 static volatile DWORD* g_pIsPlaying = NULL;
 
 static bool g_bCustomVideoActive = false;
-static HWND g_hVideoChild = NULL;
 static WNDPROC g_pOrigWndProc = NULL;
-
-static LRESULT CALLBACK VideoChildSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
-    switch (uMsg) {
-        case WM_ERASEBKGND:
-            return 1;
-        case WM_LBUTTONDOWN:
-        case WM_RBUTTONDOWN:
-        case WM_KEYDOWN:
-            if (g_ppGameHWnd && *g_ppGameHWnd) {
-                PostMessageA(*g_ppGameHWnd, uMsg, wParam, lParam);
-            }
-            return 0;
-    }
-    return DefWindowProcW(hWnd, uMsg, wParam, lParam);
-}
 
 // Subclass window proc for intercepting game engine media messages
 static LRESULT CALLBACK SubclassWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
@@ -119,48 +103,16 @@ static LRESULT CALLBACK SubclassWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
                     wchar_t wSelectedFile[MAX_PATH];
                     MultiByteToWideChar(CP_ACP, 0, selectedFile, -1, wSelectedFile, MAX_PATH);
 
-                    // Create pristine child window on the main thread
-                    if (g_hVideoChild) {
-                        DestroyWindow(g_hVideoChild);
-                        g_hVideoChild = NULL;
-                    }
+                    LogInfo("[Video] Playing modern AV1 video via Media Foundation on popup: %s (Parent: %p)",
+                            selectedFile, hWnd);
 
-                    RECT rc = { 0 };
-                    GetClientRect(hWnd, &rc);
-                    int w = rc.right - rc.left;
-                    int h = rc.bottom - rc.top;
-                    if (w <= 0) w = 1280;
-                    if (h <= 0) h = 720;
-
-                    WNDCLASSW wc = { 0 };
-                    wc.lpfnWndProc = VideoChildSubclassProc;
-                    wc.hInstance = GetModuleHandle(NULL);
-                    wc.lpszClassName = L"EscudeVideoChild";
-                    wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
-                    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-                    RegisterClassW(&wc);
-
-                    g_hVideoChild = CreateWindowExW(
-                        0, L"EscudeVideoChild", L"",
-                        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
-                        0, 0, w, h,
-                        hWnd, NULL, GetModuleHandle(NULL), NULL
-                    );
-
-                    LogInfo("[Video] Playing modern AV1 video via Media Foundation: %s (Child: %p, Parent: %p)",
-                            selectedFile, g_hVideoChild, hWnd);
-
-                    if (MFVideo_Play(wSelectedFile, g_hVideoChild)) {
+                    if (MFVideo_Play(wSelectedFile, hWnd)) {
                         LogInfo("[Video] MFVideo_Play started successfully!");
                         g_bCustomVideoActive = true;
                         if (g_pIsPlaying) *g_pIsPlaying = 1;
                         return 1;
                     } else {
                         LogInfo("[Video] MFVideo_Play failed!");
-                        if (g_hVideoChild) {
-                            DestroyWindow(g_hVideoChild);
-                            g_hVideoChild = NULL;
-                        }
                     }
                 }
             }
@@ -172,14 +124,8 @@ static LRESULT CALLBACK SubclassWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
         case 1207: // media_stop
         {
             if (g_bCustomVideoActive) {
-                LogInfo("[Video] Media close/stop requested");
+                LogInfo("[Video] Media close requested");
                 MFVideo_Stop();
-                if (g_hVideoChild) {
-                    DestroyWindow(g_hVideoChild);
-                    g_hVideoChild = NULL;
-                    InvalidateRect(hWnd, NULL, TRUE);
-                    UpdateWindow(hWnd);
-                }
                 if (g_pIsPlaying) *g_pIsPlaying = 0;
                 g_bCustomVideoActive = false;
                 return 1;
@@ -189,7 +135,10 @@ static LRESULT CALLBACK SubclassWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
 
         case 1206: // media_pause
         case 1208: // media_repeat
+        case 1210: // media_play
+        case 1211: // media_setvol
         case 1212: // media_size
+        case 1213: // media_setvol alt
         {
             if (g_bCustomVideoActive) {
                 return 1;
@@ -197,32 +146,16 @@ static LRESULT CALLBACK SubclassWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
             break;
         }
 
-        case 1209:
-        case 1210: // media_isplay! (Polled by while(media_isplay()))
+        case 1209: // media_isplay
         {
             if (g_bCustomVideoActive) {
                 bool playing = MFVideo_IsPlaying();
                 if (!playing) {
                     MFVideo_Stop();
-                    if (g_hVideoChild) {
-                        DestroyWindow(g_hVideoChild);
-                        g_hVideoChild = NULL;
-                        InvalidateRect(hWnd, NULL, TRUE);
-                        UpdateWindow(hWnd);
-                    }
                     if (g_pIsPlaying) *g_pIsPlaying = 0;
                     g_bCustomVideoActive = false;
                 }
                 return playing ? 1 : 0;
-            }
-            break;
-        }
-
-        case 1211: // media_setvol (wParam = volume 0-100)
-        {
-            if (g_bCustomVideoActive) {
-                MFVideo_SetVolume((int)wParam);
-                return 1;
             }
             break;
         }
@@ -388,7 +321,7 @@ static void InitHooks(void) {
     g_pIsPlaying         = (volatile DWORD*)g_pCurrentGame->is_playing_ptr;
 
     LogInfo("=== d3d9_hook initialized ===");
-    LogInfo("Base: %p, EntryPoint RVA: 0x000F9429", (void*)hMain, entryRVA);
+    LogInfo("Base: %p, EntryPoint RVA: 0x%08X", (void*)hMain, entryRVA);
     LogInfo("Target Game: %s", g_pCurrentGame->game_name);
 
     // Install inline hook on LoadPNG (6 bytes: 55 8b ec 83 ec 48)
@@ -407,10 +340,6 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
         InitHooks();
     } else if (fdwReason == DLL_PROCESS_DETACH) {
         MFVideo_Stop();
-        if (g_hVideoChild) {
-            DestroyWindow(g_hVideoChild);
-            g_hVideoChild = NULL;
-        }
     }
     return TRUE;
 }

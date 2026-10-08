@@ -8,10 +8,9 @@
 extern "C" {
 #endif
 
-bool MFVideo_Play(const wchar_t* pwszFilePath, HWND hwndVideo);
+bool MFVideo_Play(const wchar_t* pwszFilePath, HWND hwndParent);
 void MFVideo_Stop(void);
 bool MFVideo_IsPlaying(void);
-void MFVideo_SetVolume(int percent);
 
 #ifdef __cplusplus
 }

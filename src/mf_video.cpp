@@ -11,16 +11,45 @@
 static const GUID k_GUID_NULL = { 0 };
 
 static volatile bool g_bIsPlaying = false;
-static volatile int  g_nVolumePercent = 100;
-
 static HANDLE g_hVideoThread = NULL;
 static HANDLE g_hStopEvent = NULL;
 static HANDLE g_hEndedEvent = NULL;
 static wchar_t g_wszCurrentFile[MAX_PATH] = { 0 };
-static HWND g_hwndVideo = NULL;
+static HWND g_hwndParent = NULL;
+static HWND g_hwndPopup = NULL;
 
 static IMFMediaSession* g_pSession = NULL;
-static IMFSimpleAudioVolume* g_pAudioVolume = NULL;
+
+static LRESULT CALLBACK VideoPopupWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    switch (uMsg) {
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_LBUTTONDOWN:
+        case WM_RBUTTONDOWN:
+        case WM_KEYDOWN:
+            // User requested skip
+            MFVideo_Stop();
+            return 0;
+        case WM_SETCURSOR:
+            SetCursor(NULL); // Hide cursor during movie
+            return TRUE;
+    }
+    return DefWindowProcW(hWnd, uMsg, wParam, lParam);
+}
+
+static void EnsureVideoClass(void) {
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSW wc = { 0 };
+        wc.lpfnWndProc = VideoPopupWndProc;
+        wc.hInstance = GetModuleHandle(NULL);
+        wc.lpszClassName = L"EscudeVideoPopup";
+        wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
+        wc.hCursor = NULL;
+        RegisterClassW(&wc);
+        registered = true;
+    }
+}
 
 class CSessionCallback : public IMFAsyncCallback {
 public:
@@ -172,7 +201,6 @@ static DWORD WINAPI VideoThreadProc(LPVOID lpParam) {
     IMFMediaSession* pSession = NULL;
     IMFTopology* pTopology = NULL;
     CSessionCallback* pCallback = NULL;
-    IMFSimpleAudioVolume* pVol = NULL;
 
     HRESULT hr = CreateMediaSource(g_wszCurrentFile, &pSource);
     if (SUCCEEDED(hr)) {
@@ -183,7 +211,7 @@ static DWORD WINAPI VideoThreadProc(LPVOID lpParam) {
         pCallback = new CSessionCallback(pSession, g_hEndedEvent);
         pSession->BeginGetEvent(pCallback, NULL);
 
-        hr = CreateTopology(pSource, g_hwndVideo, &pTopology);
+        hr = CreateTopology(pSource, g_hwndPopup, &pTopology);
     }
     if (SUCCEEDED(hr)) {
         hr = pSession->SetTopology(0, pTopology);
@@ -194,31 +222,17 @@ static DWORD WINAPI VideoThreadProc(LPVOID lpParam) {
         varStart.vt = VT_EMPTY;
         hr = pSession->Start(&k_GUID_NULL, &varStart);
     }
-    if (SUCCEEDED(hr)) {
-        MFGetService(pSession, MR_POLICY_VOLUME_SERVICE, IID_PPV_ARGS(&pVol));
-        if (pVol) {
-            g_pAudioVolume = pVol;
-            float fVol = (float)g_nVolumePercent / 100.0f;
-            if (fVol < 0.0f) fVol = 0.0f;
-            if (fVol > 1.0f) fVol = 1.0f;
-            pVol->SetMasterVolume(fVol);
-        }
 
-        // Wait for either stop request or video completion event
+    if (SUCCEEDED(hr)) {
         HANDLE waitHandles[2] = { g_hStopEvent, g_hEndedEvent };
         WaitForMultipleObjects(2, waitHandles, FALSE, INFINITE);
     }
 
-    // Cleanup session and source
     if (pSession) {
         pSession->Stop();
         pSession->Close();
         pSession->Release();
         g_pSession = NULL;
-    }
-    if (pVol) {
-        pVol->Release();
-        g_pAudioVolume = NULL;
     }
     if (pTopology) {
         pTopology->Release();
@@ -238,14 +252,40 @@ static DWORD WINAPI VideoThreadProc(LPVOID lpParam) {
     return 0;
 }
 
-bool MFVideo_Play(const wchar_t* pwszFilePath, HWND hwndVideo) {
+bool MFVideo_Play(const wchar_t* pwszFilePath, HWND hwndParent) {
     MFVideo_Stop();
 
-    if (!pwszFilePath || !hwndVideo) return false;
+    if (!pwszFilePath || !hwndParent) return false;
     wcsncpy(g_wszCurrentFile, pwszFilePath, MAX_PATH - 1);
     g_wszCurrentFile[MAX_PATH - 1] = L'\0';
 
-    g_hwndVideo = hwndVideo;
+    g_hwndParent = hwndParent;
+
+    EnsureVideoClass();
+
+    // Determine client position and dimensions in screen coordinates
+    POINT pt = { 0, 0 };
+    ClientToScreen(hwndParent, &pt);
+    RECT rc = { 0 };
+    GetClientRect(hwndParent, &rc);
+    int width = rc.right - rc.left;
+    int height = rc.bottom - rc.top;
+    if (width <= 0) width = 1280;
+    if (height <= 0) height = 720;
+
+    // Create a borderless, top-level popup window perfectly matching the game viewport
+    g_hwndPopup = CreateWindowExW(
+        WS_EX_TOPMOST, L"EscudeVideoPopup", L"",
+        WS_POPUP | WS_VISIBLE,
+        pt.x, pt.y, width, height,
+        hwndParent, NULL, GetModuleHandle(NULL), NULL
+    );
+
+    if (!g_hwndPopup) return false;
+
+    ShowWindow(g_hwndPopup, SW_SHOW);
+    UpdateWindow(g_hwndPopup);
+
     g_bIsPlaying = true;
 
     if (!g_hStopEvent)  g_hStopEvent  = CreateEvent(NULL, FALSE, FALSE, NULL);
@@ -256,6 +296,8 @@ bool MFVideo_Play(const wchar_t* pwszFilePath, HWND hwndVideo) {
     g_hVideoThread = CreateThread(NULL, 0, VideoThreadProc, NULL, 0, NULL);
     if (!g_hVideoThread) {
         g_bIsPlaying = false;
+        DestroyWindow(g_hwndPopup);
+        g_hwndPopup = NULL;
         return false;
     }
 
@@ -272,18 +314,17 @@ void MFVideo_Stop(void) {
         CloseHandle(g_hVideoThread);
         g_hVideoThread = NULL;
     }
+    if (g_hwndPopup) {
+        DestroyWindow(g_hwndPopup);
+        g_hwndPopup = NULL;
+        if (g_hwndParent) {
+            InvalidateRect(g_hwndParent, NULL, TRUE);
+            UpdateWindow(g_hwndParent);
+            SetFocus(g_hwndParent);
+        }
+    }
 }
 
 bool MFVideo_IsPlaying(void) {
     return g_bIsPlaying;
-}
-
-void MFVideo_SetVolume(int percent) {
-    g_nVolumePercent = percent;
-    if (g_pAudioVolume) {
-        float fVol = (float)percent / 100.0f;
-        if (fVol < 0.0f) fVol = 0.0f;
-        if (fVol > 1.0f) fVol = 1.0f;
-        g_pAudioVolume->SetMasterVolume(fVol);
-    }
 }
