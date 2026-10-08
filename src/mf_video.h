@@ -8,8 +8,7 @@
 extern "C" {
 #endif
 
-// Start playback in an isolated worker thread on a dedicated child window over hwndParent
-bool MFVideo_Play(const wchar_t* pwszFilePath, HWND hwndParent);
+bool MFVideo_Play(const wchar_t* pwszFilePath, HWND hwndVideo);
 void MFVideo_Stop(void);
 bool MFVideo_IsPlaying(void);
 void MFVideo_SetVolume(int percent);

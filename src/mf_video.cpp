@@ -11,46 +11,73 @@
 static const GUID k_GUID_NULL = { 0 };
 
 static volatile bool g_bIsPlaying = false;
-static volatile bool g_bStopRequested = false;
 static volatile int  g_nVolumePercent = 100;
 
 static HANDLE g_hVideoThread = NULL;
+static HANDLE g_hStopEvent = NULL;
+static HANDLE g_hEndedEvent = NULL;
 static wchar_t g_wszCurrentFile[MAX_PATH] = { 0 };
-static HWND g_hwndParent = NULL;
-static HWND g_hwndChild = NULL;
+static HWND g_hwndVideo = NULL;
 
 static IMFMediaSession* g_pSession = NULL;
 static IMFSimpleAudioVolume* g_pAudioVolume = NULL;
 
-static LRESULT CALLBACK VideoChildWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
-    switch (uMsg) {
-        case WM_ERASEBKGND:
-            return 1;
-        case WM_LBUTTONDOWN:
-        case WM_RBUTTONDOWN:
-        case WM_KEYDOWN:
-            if (g_hwndParent) {
-                // Forward input to parent window so game can skip movie
-                PostMessageA(g_hwndParent, uMsg, wParam, lParam);
-            }
-            return 0;
-    }
-    return DefWindowProcW(hWnd, uMsg, wParam, lParam);
-}
+class CSessionCallback : public IMFAsyncCallback {
+public:
+    CSessionCallback(IMFMediaSession* pSession, HANDLE hEnded)
+        : m_nRefCount(1), m_pSession(pSession), m_hEnded(hEnded) {}
 
-static void EnsureVideoClass(void) {
-    static bool registered = false;
-    if (!registered) {
-        WNDCLASSW wc = { 0 };
-        wc.lpfnWndProc = VideoChildWndProc;
-        wc.hInstance = GetModuleHandle(NULL);
-        wc.lpszClassName = L"EscudeVideoWnd";
-        wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
-        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-        RegisterClassW(&wc);
-        registered = true;
+    STDMETHODIMP QueryInterface(REFIID riid, void** ppv) {
+        if (!ppv) return E_POINTER;
+        if (riid == IID_IUnknown || riid == IID_IMFAsyncCallback) {
+            *ppv = static_cast<IMFAsyncCallback*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *ppv = NULL;
+        return E_NOINTERFACE;
     }
-}
+
+    STDMETHODIMP_(ULONG) AddRef() {
+        return InterlockedIncrement(&m_nRefCount);
+    }
+
+    STDMETHODIMP_(ULONG) Release() {
+        ULONG uCount = InterlockedDecrement(&m_nRefCount);
+        if (uCount == 0) delete this;
+        return uCount;
+    }
+
+    STDMETHODIMP GetParameters(DWORD* pdwFlags, DWORD* pdwQueue) {
+        return E_NOTIMPL;
+    }
+
+    STDMETHODIMP Invoke(IMFAsyncResult* pResult) {
+        if (!m_pSession) return S_OK;
+
+        IMFMediaEvent* pEvent = NULL;
+        HRESULT hr = m_pSession->EndGetEvent(pResult, &pEvent);
+        if (SUCCEEDED(hr) && pEvent) {
+            MediaEventType met = MEUnknown;
+            pEvent->GetType(&met);
+            pEvent->Release();
+
+            if (met == MESessionEnded || met == MESessionClosed) {
+                g_bIsPlaying = false;
+                if (m_hEnded) SetEvent(m_hEnded);
+            } else {
+                m_pSession->BeginGetEvent(this, NULL);
+            }
+        }
+        return S_OK;
+    }
+
+private:
+    virtual ~CSessionCallback() {}
+    long m_nRefCount;
+    IMFMediaSession* m_pSession;
+    HANDLE m_hEnded;
+};
 
 static HRESULT CreateMediaSource(PCWSTR pszURL, IMFMediaSource** ppSource) {
     IMFSourceResolver* pSourceResolver = NULL;
@@ -138,34 +165,13 @@ static HRESULT CreateTopology(IMFMediaSource* pSource, HWND hwndVideo, IMFTopolo
 }
 
 static DWORD WINAPI VideoThreadProc(LPVOID lpParam) {
-    // Isolated COM multithreaded apartment in this worker thread only
     CoInitializeEx(NULL, COINIT_MULTITHREADED);
     MFStartup(MF_VERSION, MFSTARTUP_FULL);
-
-    HWND hParent = g_hwndParent;
-    RECT rc = { 0 };
-    if (hParent) {
-        GetClientRect(hParent, &rc);
-    }
-    int width = rc.right - rc.left;
-    int height = rc.bottom - rc.top;
-    if (width <= 0) width = 1280;
-    if (height <= 0) height = 720;
-
-    EnsureVideoClass();
-
-    // Create a pristine child window on top of hParent
-    HWND hChild = CreateWindowExW(
-        0, L"EscudeVideoWnd", L"",
-        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
-        0, 0, width, height,
-        hParent, NULL, GetModuleHandle(NULL), NULL
-    );
-    g_hwndChild = hChild;
 
     IMFMediaSource* pSource = NULL;
     IMFMediaSession* pSession = NULL;
     IMFTopology* pTopology = NULL;
+    CSessionCallback* pCallback = NULL;
     IMFSimpleAudioVolume* pVol = NULL;
 
     HRESULT hr = CreateMediaSource(g_wszCurrentFile, &pSource);
@@ -174,7 +180,10 @@ static DWORD WINAPI VideoThreadProc(LPVOID lpParam) {
     }
     if (SUCCEEDED(hr)) {
         g_pSession = pSession;
-        hr = CreateTopology(pSource, hChild, &pTopology);
+        pCallback = new CSessionCallback(pSession, g_hEndedEvent);
+        pSession->BeginGetEvent(pCallback, NULL);
+
+        hr = CreateTopology(pSource, g_hwndVideo, &pTopology);
     }
     if (SUCCEEDED(hr)) {
         hr = pSession->SetTopology(0, pTopology);
@@ -195,25 +204,12 @@ static DWORD WINAPI VideoThreadProc(LPVOID lpParam) {
             pVol->SetMasterVolume(fVol);
         }
 
-        // Wait loop: block on session events while checking for stop request
-        while (!g_bStopRequested) {
-            IMFMediaEvent* pEvent = NULL;
-            HRESULT evHr = pSession->GetEvent(0, &pEvent);
-            if (SUCCEEDED(evHr) && pEvent) {
-                MediaEventType met = MEUnknown;
-                pEvent->GetType(&met);
-                pEvent->Release();
-
-                if (met == MESessionEnded || met == MESessionClosed) {
-                    break;
-                }
-            } else {
-                if (FAILED(evHr)) break;
-            }
-        }
+        // Wait for either stop request or video completion event
+        HANDLE waitHandles[2] = { g_hStopEvent, g_hEndedEvent };
+        WaitForMultipleObjects(2, waitHandles, FALSE, INFINITE);
     }
 
-    // Cleanup session and source inside worker thread
+    // Cleanup session and source
     if (pSession) {
         pSession->Stop();
         pSession->Close();
@@ -231,36 +227,31 @@ static DWORD WINAPI VideoThreadProc(LPVOID lpParam) {
         pSource->Shutdown();
         pSource->Release();
     }
-
-    if (hChild) {
-        DestroyWindow(hChild);
-        g_hwndChild = NULL;
+    if (pCallback) {
+        pCallback->Release();
     }
 
     MFShutdown();
     CoUninitialize();
 
     g_bIsPlaying = false;
-
-    // Repaint parent window
-    if (hParent) {
-        InvalidateRect(hParent, NULL, TRUE);
-        UpdateWindow(hParent);
-    }
-
     return 0;
 }
 
-bool MFVideo_Play(const wchar_t* pwszFilePath, HWND hwndParent) {
+bool MFVideo_Play(const wchar_t* pwszFilePath, HWND hwndVideo) {
     MFVideo_Stop();
 
-    if (!pwszFilePath || !hwndParent) return false;
+    if (!pwszFilePath || !hwndVideo) return false;
     wcsncpy(g_wszCurrentFile, pwszFilePath, MAX_PATH - 1);
     g_wszCurrentFile[MAX_PATH - 1] = L'\0';
 
-    g_hwndParent = hwndParent;
-    g_bStopRequested = false;
+    g_hwndVideo = hwndVideo;
     g_bIsPlaying = true;
+
+    if (!g_hStopEvent)  g_hStopEvent  = CreateEvent(NULL, FALSE, FALSE, NULL);
+    if (!g_hEndedEvent) g_hEndedEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
+    ResetEvent(g_hStopEvent);
+    ResetEvent(g_hEndedEvent);
 
     g_hVideoThread = CreateThread(NULL, 0, VideoThreadProc, NULL, 0, NULL);
     if (!g_hVideoThread) {
@@ -273,14 +264,14 @@ bool MFVideo_Play(const wchar_t* pwszFilePath, HWND hwndParent) {
 
 void MFVideo_Stop(void) {
     if (g_bIsPlaying) {
-        g_bStopRequested = true;
+        g_bIsPlaying = false;
+        if (g_hStopEvent) SetEvent(g_hStopEvent);
     }
     if (g_hVideoThread) {
-        WaitForSingleObject(g_hVideoThread, 3000);
+        WaitForSingleObject(g_hVideoThread, 1500);
         CloseHandle(g_hVideoThread);
         g_hVideoThread = NULL;
     }
-    g_bIsPlaying = false;
 }
 
 bool MFVideo_IsPlaying(void) {
