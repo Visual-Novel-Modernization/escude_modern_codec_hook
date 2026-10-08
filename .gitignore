@@ -1,0 +1,18 @@
+# Build outputs
+bin/
+*.o
+*.a
+*.dll
+*.exe
+*.log
+*.bak
+*.tmp
+*.new
+
+# Python cache
+__pycache__/
+*.pyc
+
+# IDE
+.vscode/
+.idea/
