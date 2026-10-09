@@ -1,39 +1,40 @@
-# Escu:de Visual Novel Modernization Hook (JXL & AV1)
+# Escu:de Visual Novel Modernization Hook (JXL & LAV Filters AV1)
 
-A modern multimedia decoding enhancement plugin for titles developed on the proprietary **Escu:de** game engine. Through DirectX 9 proxy injection, it enables seamless decoding of high-compression **JPEG XL (JXL)** images and modern high-definition **AV1 (libsvtav1)** video.
+A modern multimedia decoding enhancement plugin for titles developed on the proprietary **Escu:de** game engine. Through DirectX 9 proxy injection, it enables seamless decoding of high-compression **JPEG XL (JXL)** images and modern high-definition AV1 video via **LAV Filters (DXVA2 / D3D11 GPU Hardware Acceleration)**.
+
+> Current branch: `feat/lavfilters` (in-process registration-free 32-bit LAV Filters architecture, delivering native GPU hardware decoding and maximum smoothness)
 
 ---
 
-## Supported Titles
+## Tested Titles (Known working)
 
 - **Haison Shoujo ~Ayashimadoi no Kago no Sato~** (`haison.exe`)
-- **Haison Shoujo Gaiden ~Kyoraku Mugen~** (`haison_fd.exe`)
-- **Haison Shoujo 2 ~Kageri Izanau Hime no Hako~** (`haison2.exe`)
+- Compatible engine family: *Haison Shoujo Gaiden ~Kyoraku Mugen~* (`haison_fd.exe`), *Haison Shoujo 2 ~Kageri Izanau Hime no Hako~* (`haison2.exe`)
 
----
+
+
+Other titles from Escu:de may or may not work with this hook depending on their engine version.
 
 ## Core Technical Architecture
 
-### 1. Dynamic Engine Version Auto-Detection
-Upon `DllMain` injection, the plugin parses the host executable's PE header to retrieve `AddressOfEntryPoint`, automatically matching memory offsets across three engine generations:
-- **Haison 1**: EntryPoint `0x000F9429` | `LoadPNG` `0x00470850` | `CreateImageBuffer` `0x004654C0`
-- **Haison Gaiden**: EntryPoint `0x000F98AC` | `LoadPNG` `0x00470C70` | `CreateImageBuffer` `0x004654E0`
-- **Haison 2**: EntryPoint `0x0009D016` | `LoadPNG` `0x0044D590` | `CreateImageBuffer` `0x00441070`
+### 1. In-Process Registration-Free LAV Filters Direct Injection (DirectShow Hardware Decoding)
+- **Registration-Free COM Architecture**: No administrator privileges required, no need to run `regsvr32`, and no registry modifications.
+- **DirectShow Topology Hijacking**:
+  - Intercepts `ole32.dll!CoCreateInstance(CLSID_FilterGraph)` and hooks `IGraphBuilder::RenderFile` (vtable slot 13).
+  - When the engine requests video playback, detects matching `.mp4` / `.webm` / `.mkv` files; on match, dynamically loads 32-bit `LAVSplitter.ax`, `LAVVideo.ax`, and `LAVAudio.ax` from the local `lav/` folder.
+  - Mounts LAV splitter and audio/video decoders directly into the engine's own `FilterGraph` and renders output pins.
+- **Full Hardware Acceleration & Zero Conflict**:
+  - `LAV Video Decoder` automatically harnesses discrete GPU **DXVA2 / D3D11** hardware decoding engines (RTX 30/40 series, Intel Arc, AMD RDNA2/3).
+  - Output feeds directly into the game's native `IVideoWindow` and DirectSound renderer, preserving original keyboard skipping, window message handling, and A/V sync logic--completely eliminating black screens and stuttering for smooth 60 FPS playback.
 
 ### 2. JXL (JPEG XL) Image Decoding Hook
-- **Hook Point**: Intercepts the engine's low-level `LoadPNG` function.
-- **Transparency & Color Pipeline**:
-  - Supports prioritized loading of loose external `.jxl` files and replacing `.png` byte streams inside `.bin` packages with JXL streams.
-  - Decodes images via `libjxl 0.11.1`, automatically inverting RGBA color order and converting to bottom-up `BGRA` scanlines required by native Windows 32-bit DIB Sections.
-  - Full support for 8-bit alpha transparency channels, eliminating dark border or color cast artifacts on character sprites.
-  - Native untranscoded PNG streams pass through directly to the original libpng pipeline for seamless backward compatibility.
-
-### 3. AV1 Hardware-Accelerated Video Playback
-- **Hook Point**: Hooks `VideoPlay` and subclasses the main window to intercept media control messages (`1204` Open, `1205` Close, `1210` Poll Playback, `1211` Volume Control).
-- **Decoding & Playback**:
-  - Built on Windows Media Foundation and EVR (Enhanced Video Renderer).
-  - Native support for AV1 video formats (`.mp4` / `.webm` / `.mkv`), prioritizing modern transcoded media.
-  - Bridges DirectShow `EC_COMPLETE` notifications, supporting hotkey skipping and native volume attenuation.
+- **Dynamic BPP Adaptive Detection**:
+  - Reads `alpha_bits` and `num_extra_channels` from the JXL header.
+  - **With Alpha Channel (Sprites / CG / Effects)**: Allocates a 32-bit DIB (`bpp = 32`), written in BGRA format for flawless alpha blending.
+  - **Without Alpha Channel (Backgrounds)**: Allocates a 24-bit DIB (`bpp = 24`), written in BGR format, ensuring engine backbuffer clears full frames to prevent UI ghosting/trailing artifacts.
+- **Static Embedding & Fallback Compatibility**:
+  - Statically linked `libjxl 0.11.1`, supporting both archive replacement and loose file loading.
+  - System font glyphs and UI mask files remain untouched in their native palette format.
 
 ---
 
@@ -44,41 +45,35 @@ escude_modern_hook/
 ├── src/
 │   ├── hook_defs.h      # Engine offset tables and function pointer definitions
 │   ├── jxl_loader.h     # JXL decoding interface
-│   ├── jxl_loader.c     # libjxl decoder and BGRA DIB conversion implementation
-│   ├── mf_video.h       # Video player interface
-│   ├── mf_video.cpp     # Media Foundation / EVR AV1 player implementation
-│   └── main.cpp         # d3d9 proxy entry point, adaptive hook, and window subclassing
+│   ├── jxl_loader.c     # libjxl decoder and 24/32-bit adaptive conversion
+│   ├── lav_hook.h       # LAV Filters registration-free injection interface
+│   ├── lav_hook.cpp     # DirectShow FilterGraph hooking and LAV instance creation
+│   └── main.cpp         # d3d9 proxy entry point, adaptive hooks
 ├── tools/
 │   ├── escarc.py        # ESC-ARC2 archive decryption and extraction tool
 │   ├── batch_jxl_bin.py # Multi-threaded batch JXL transcoding and repacking tool
 │   └── transcode_tool.py# Automated single-file transcoding script
-├── build.bat            # One-click MinGW32 build script
+├── build.bat            # One-click MinGW32 fully-static build script
 ├── .gitignore
 └── README.md
 ```
 
 ---
 
-## Building
+## Deployment
 
-Requirements:
-- MinGW32 / MSYS2 (`i686-w64-mingw32-g++`)
-- `mingw-w64-i686-libjxl` static library support
-
-Run `build.bat` in the root directory to generate `d3d9.dll` and dependencies in `bin/`.
-
----
-
-## Deployment & Asset Transcoding
-
-1. Place the compiled `d3d9.dll` and `libwinpthread-1.dll` in the game root directory.
-2. Recommended video transcoding parameters (HandBrakeCLI / SVT-AV1):
-   ```bash
-   HandBrakeCLI.exe -i opening.wmv -o opening.mp4 -e svt_av1 --encoder-preset 5 -q 30 -E av_aac -B 192
-   ```
-   Rename the original `opening.wmv` to `opening.wmv.bak`.
-3. Image transcoding (JXL):
-   ```bash
-   python tools/batch_jxl_bin.py <bg.bin/st.bin/ev.bin/gfx.bin>
-   ```
-   The tool automatically extracts PNGs, transcodes them with `effort 7, quality 90`, and repacks them into `.bin` archives with the same name, backing up original files as `.bak`.
+The game root directory only requires the following file layout:
+```
+<game_root>/
+├── d3d9.dll                  # Core hook plugin (independent of MSYS runtime)
+├── libwinpthread-1.dll       # Runtime support library
+├── lav/                      # 32-bit LAV Filters runtime folder
+│   ├── LAVSplitter.ax
+│   ├── LAVVideo.ax           # GPU hardware accelerated video decoder
+│   ├── LAVAudio.ax
+│   └── avcodec-lav-63.dll etc.
+├── opening.mp4               # AV1 compressed video (~19.5 MB, 89% reduction)
+├── opening.wmv.bak           # Original video backup
+├── bg.bin / st.bin / ev.bin  # JXL compressed archives
+└── gfx.bin                   # Original system font and UI archive
+```
